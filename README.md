@@ -37,11 +37,11 @@ import.
 
 For the 2D NUFFT path (`FresnelNUFFT3Vec`):
 
-- [`finufft`](https://finufft.readthedocs.io) (Python bindings)
-
+- [`finufft`](https://finufft.readthedocs.io)
+  
 For the axisymmetric Hankel path:
 
-- `juliacall` (Python ↔ Julia bridge)
+- `juliacall` (for Python ↔ Julia bridge)
 - Julia packages:
   - `FastHankelTransform`
   - `ForwardDiff` (used inside FastHankelTransform)
