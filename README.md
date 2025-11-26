@@ -1,3 +1,6 @@
+All user-facing classes are re-exported from `fift.__init__` for convenient
+import.
+
 ---
 
 ## Main features
