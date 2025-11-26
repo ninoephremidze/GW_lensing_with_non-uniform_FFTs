@@ -7,7 +7,7 @@ All user-facing classes are re-exported from `fift.__init__` for convenient impo
 
 - **General 2D Fresnel integral (NUFFT)**  
   `FresnelNUFFT3Vec`: batched Fresnel integrals using FINUFFT’s type-3 NUFFT
-  and 2D Gauss–Legendre quadrature on \([-U_{\max}, U_{\max}]^2\).
+  and 2D Gauss–Legendre quadrature on $([-U_{\max}, U_{\max}]^2\)$.
 
 - **Axisymmetric Fresnel integral (NUFHT)**  
   - `FresnelHankelAxisymmetric`: uses **precomputed 1D Gauss–Legendre nodes**
