@@ -16,7 +16,7 @@ All user-facing classes are re-exported from `fift.__init__` for convenient impo
     uses a **uniform radial grid + trapezoidal rule** instead of Gauss–Legendre.
 
 - **Lens models**  
-  Contains common axisymmetric lens models such as `AxisymmetricLens`, `SIS`, `PointLens`, etc.
+  Contains simple axisymmetric lens models: `SIS` and `PointLens`.
 
 - **Precomputed Gauss–Legendre grids**  
   - Utilities for precomputing and storing 1D or 2D GL nodes/weights live in
