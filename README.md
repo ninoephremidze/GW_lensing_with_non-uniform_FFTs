@@ -20,7 +20,7 @@ import.
 
 - **Precomputed Gauss–Legendre grids**  
   - Utilities for precomputing and storing 1D or 2D GL nodes/weights live in
-    the notebook `precompute_GL.ipynb`).
+    the notebook `precompute_GL.ipynb`.
   - Both spherical and symmetric cases load in the precomputed GL quadratures.
 
 - **Comparison helpers**
