@@ -26,8 +26,8 @@ import.
 - **Comparison helpers**
   - `time_func(fn, ...)`: best-of-N timing helper.  
   - `plot_overlays_ws(...)`: log–log overlay plots for comparing `fift` results vs GLoW.
-    The general 2D FIFT case is compared to the most general GLoW function (`It_MultiContour_C()`).
-    The spherical hankel FIFT case is compared to the fast, axisymmetric GLoW function (`It_SingleIntegral_C()`).
+    - The general 2D FIFT case is compared to the most general GLoW function (`It_MultiContour_C()`).
+    - The spherical hankel FIFT case is compared to the fast, axisymmetric GLoW function (`It_SingleIntegral_C()`).
 
 ---
 
