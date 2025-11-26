@@ -7,7 +7,7 @@ import.
 
 - **General 2D Fresnel integral (NUFFT)**  
   `FresnelNUFFT3Vec`: batched Fresnel integrals using FINUFFT’s type-3 NUFFT
-  and 2D Gauss–Legendre quadrature on $([-U_{\max}, U_{\max}]^2)$.
+  and 2D Gauss–Legendre quadrature.
 
 - **Axisymmetric Fresnel integral (NUFHT)**  
   - `FresnelHankelAxisymmetric`: uses **precomputed 1D Gauss–Legendre nodes**
