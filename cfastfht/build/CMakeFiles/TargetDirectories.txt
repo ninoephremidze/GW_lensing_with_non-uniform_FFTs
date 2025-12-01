@@ -1,0 +1,3 @@
+/workspace/cfastfht/build/CMakeFiles/cfastfht.dir
+/workspace/cfastfht/build/CMakeFiles/edit_cache.dir
+/workspace/cfastfht/build/CMakeFiles/rebuild_cache.dir

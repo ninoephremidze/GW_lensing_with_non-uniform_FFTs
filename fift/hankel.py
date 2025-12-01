@@ -5,11 +5,22 @@ from pathlib import Path
 from .lenses import AxisymmetricLens
 from .utils import CPUTracker
 
-_HAS_FHT = False
-_FHT_ERR = None
+_HAS_CFASTFHT = False
+_CFASTFHT_ERR = None
+_HAS_JULIA_FHT = False
+_JULIA_FHT_ERR = None
+j_fht_batch = None
+jl = None
 
 try:
-    from juliacall import Main as jl
+    from .fast_hankel_c import fht_batch as c_fht_batch  # type: ignore
+
+    _HAS_CFASTFHT = True
+except Exception as exc:  # pragma: no cover - backend optional
+    _CFASTFHT_ERR = exc
+
+try:
+    from juliacall import Main as jl  # type: ignore
 
     jl.seval("""
         using FastHankelTransform
@@ -34,11 +45,42 @@ try:
     """)
 
     j_fht_batch = jl.fht_batch
-    _HAS_FHT = True
+    _HAS_JULIA_FHT = True
+except Exception as exc:  # pragma: no cover - backend optional
+    _JULIA_FHT_ERR = exc
+    jl = None
 
-except Exception as e:
-    _HAS_FHT = False
-    _FHT_ERR = e
+
+def _backend_available() -> bool:
+    return _HAS_CFASTFHT or _HAS_JULIA_FHT
+
+
+def _backend_error() -> str:
+    parts = []
+    if _CFASTFHT_ERR is not None:
+        parts.append(f"C backend: {_CFASTFHT_ERR!r}")
+    if _JULIA_FHT_ERR is not None:
+        parts.append(f"Julia backend: {_JULIA_FHT_ERR!r}")
+    if not parts:
+        return "No Hankel backend available"
+    return "; ".join(parts)
+
+
+def _run_nufht(nu, rs, ys, coeff_re, coeff_im, tol, jr=None, jy=None):
+    coeff_re = np.ascontiguousarray(coeff_re, dtype=np.float64)
+    coeff_im = np.ascontiguousarray(coeff_im, dtype=np.float64)
+    if _HAS_CFASTFHT:
+        rs_arr = np.ascontiguousarray(rs, dtype=np.float64)
+        ys_arr = np.ascontiguousarray(ys, dtype=np.float64)
+        return c_fht_batch(nu, rs_arr, ys_arr, coeff_re, coeff_im, tol=tol)
+    if _HAS_JULIA_FHT and j_fht_batch is not None and jl is not None:
+        jr_use = jr if jr is not None else jl.Array(np.ascontiguousarray(rs, dtype=float))
+        jy_use = jy if jy is not None else jl.Array(np.ascontiguousarray(ys, dtype=float))
+        j_c_re = jl.Array(coeff_re)
+        j_c_im = jl.Array(coeff_im)
+        g_re_all, g_im_all = j_fht_batch(nu, jr_use, jy_use, j_c_re, j_c_im, tol=tol)
+        return np.array(g_re_all), np.array(g_im_all)
+    raise ImportError(_backend_error())
 
 
 # ----------------------------------------------------------------------
@@ -69,9 +111,8 @@ class FresnelHankelAxisymmetric:
         if not isinstance(lens, AxisymmetricLens):
             raise TypeError("FresnelHankelAxisymmetric requires AxisymmetricLens")
 
-        if not _HAS_FHT:
-            raise ImportError("FastHankelTransform.jl cannot be loaded: "
-                              f"{_FHT_ERR!r}")
+        if not _backend_available():
+            raise ImportError(_backend_error())
 
         self.lens = lens
         self.n_gl = int(n_gl)
@@ -98,8 +139,7 @@ class FresnelHankelAxisymmetric:
         self._rs = rs.astype(float)
         self._u_weights = u_weights.astype(float)
 
-        # Julia arrays
-        self._jr = jl.Array(self._rs)
+        self._jr = jl.Array(self._rs) if _HAS_JULIA_FHT and jl is not None else None
 
     # ------------------------------------------------------------------
     # Main evaluation
@@ -113,9 +153,6 @@ class FresnelHankelAxisymmetric:
 
         rs = self._rs
         u_weights = self._u_weights
-
-        jr = self._jr
-        jy = jl.Array(y_vec)
 
         nu = 0
         tol = self.tol
@@ -139,14 +176,19 @@ class FresnelHankelAxisymmetric:
                 c_re[i,:] = ck.real
                 c_im[i,:] = ck.imag
 
-            j_c_re = jl.Array(c_re)
-            j_c_im = jl.Array(c_im)
+            jy = jl.Array(y_vec) if _HAS_JULIA_FHT and jl is not None else None
 
             # ---------- Run batched NUFHT ----------
-            g_re_all, g_im_all = j_fht_batch(nu, jr, jy, j_c_re, j_c_im, tol=tol)
-
-            g_re = np.array(g_re_all)
-            g_im = np.array(g_im_all)
+            g_re, g_im = _run_nufht(
+                nu,
+                rs,
+                y_vec,
+                c_re,
+                c_im,
+                tol,
+                jr=self._jr if jy is not None else None,
+                jy=jy,
+            )
 
             # ---------- Assemble full Fresnel integral ----------
             for i, w in enumerate(w_vec):
@@ -188,11 +230,8 @@ class FresnelHankelAxisymmetricTrapezoidal:
                 "FresnelHankelAxisymmetric requires an AxisymmetricLens instance."
             )
 
-        if not _HAS_FHT:
-            raise ImportError(
-                "FastHankelTransform.jl is not available via juliacall.\n"
-                f"Original import error: {_FHT_ERR!r}"
-            )
+        if not _backend_available():
+            raise ImportError(_backend_error())
 
         self.lens = lens
         self.n_r = int(n_r)
@@ -202,8 +241,7 @@ class FresnelHankelAxisymmetricTrapezoidal:
         # Build radial grid r_k and weights w_k for ∫_0^{Umax} u f(u) du.
         self._rs, self._u_weights = self._build_radial_grid()
 
-        # Julia arrays we can reuse on each call
-        self._jr = jl.Array(self._rs)
+        self._jr = jl.Array(self._rs) if _HAS_JULIA_FHT and jl is not None else None
 
     # ------------------------------------------------------------------
     # Radial grid and quadrature weights
@@ -246,9 +284,6 @@ class FresnelHankelAxisymmetricTrapezoidal:
         rs = self._rs                # u_k
         u_weights = self._u_weights  # u_k Δu_k
 
-        jr = self._jr                # Julia array for rs
-        jy = jl.Array(y_vec)         # Julia array for y
-
         nu = 0                       # J_0 Hankel transform
         tol = self.tol
 
@@ -277,18 +312,19 @@ class FresnelHankelAxisymmetricTrapezoidal:
             c_re_batch = np.stack(all_c_re, axis=0)
             c_im_batch = np.stack(all_c_im, axis=0)
 
-            # Send to Julia
-            j_c_re = jl.Array(c_re_batch)
-            j_c_im = jl.Array(c_im_batch)
+            jy = jl.Array(y_vec) if _HAS_JULIA_FHT and jl is not None else None
 
-            # ---------------- Threaded Hankel transform in Julia ----------------
-            g_re_all, g_im_all = j_fht_batch(
-                nu, jr, jy, j_c_re, j_c_im, tol=tol
+            # ---------------- Batched Hankel transform ----------------
+            g_re, g_im = _run_nufht(
+                nu,
+                rs,
+                y_vec,
+                c_re_batch,
+                c_im_batch,
+                tol,
+                jr=self._jr if jy is not None else None,
+                jy=jy,
             )
-
-            # Bring back to NumPy
-            g_re = np.array(g_re_all, dtype=float)  # shape (n_w, n_y)
-            g_im = np.array(g_im_all, dtype=float)
 
             # ---------------- Apply quadratic phase + 1/(i w) factor ----------------
             for i, w in enumerate(w_vec):
