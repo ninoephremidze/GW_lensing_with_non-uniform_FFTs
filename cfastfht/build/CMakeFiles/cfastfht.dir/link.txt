@@ -1,0 +1,1 @@
+/usr/bin/cc -fPIC -O3 -DNDEBUG -shared -Wl,-soname,libcfastfht.so -o libcfastfht.so CMakeFiles/cfastfht.dir/src/cfastfht.c.o  -Wl,-rpath,/home/ubuntu/.local/lib/python3.12/site-packages/finufft /home/ubuntu/.local/lib/python3.12/site-packages/finufft/libfinufft.so -lm 

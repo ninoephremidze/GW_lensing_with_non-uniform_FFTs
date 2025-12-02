@@ -39,14 +39,36 @@ For the 2D NUFFT path (`FresnelNUFFT3Vec`):
 
 - [`finufft`](https://finufft.readthedocs.io)
   
-For the axisymmetric Hankel path:
+For the axisymmetric Hankel path you now have **two** choices:
 
-- `juliacall` (for Python ↔ Julia bridge)
-- Julia packages:
-  - `FastHankelTransform`
-  - `ForwardDiff` (used inside FastHankelTransform)
+1. **Native C backend (preferred when available)**
+   - `finufft` Python wheel (ships `libfinufft.so`)
+   - C17 compiler + CMake ≥ 3.16
 
-Install Python requirements:
+2. **Julia backend (legacy fallback)**
+   - `juliacall`
+   - Julia packages `FastHankelTransform` + `ForwardDiff`
+
+Install the shared Python requirements:
 
 ```bash
-pip install numpy psutil threadpoolctl finufft matplotlib juliacall
+pip install numpy psutil threadpoolctl finufft matplotlib juliacall pytest
+```
+
+### Building the C NUFHT backend (optional)
+
+```bash
+cd cfastfht
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
+      -DFINUFFT_LIB_DIR=$(python3 - <<'PY'
+import importlib, pathlib
+print(pathlib.Path(importlib.import_module("finufft").__file__).parent)
+PY
+)
+cmake --build build
+```
+
+Ensure `libcfastfht.so` (the build output) stays in `cfastfht/build/` or add its
+location to `CFASTFHT_LIB` before importing `fift`.  The hankel module will load
+this backend automatically and fall back to Julia only when the shared library
+cannot be found.
