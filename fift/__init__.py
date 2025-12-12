@@ -1,26 +1,40 @@
-"""
-FIFT: Fresnel Integral via Fourier Transforms.
+import os
 
- - 2D nonuniform FFT (NUFFT) for general lenses.
- - Fast Hankel transform (FHT/FFTLog) for circular symmetry, with
-   a robust NUFFT fallback when FHT is not available.
-
-Author: Nino Ephremidze
-"""
 from .lenses import Lens, AxisymmetricLens, SIS, PointLens
-from .axisym import FresnelHankel
-from .axisym_quad import FresnelHankelQuad
-from .spatial import (
-    FresnelNUFFT2D, FresnelNUFFT3, FresnelDirect3
+from .spatial import FresnelNUFFT3Vec
+from .hankel import (
+    FresnelHankelAxisymmetric,
+    FresnelHankelAxisymmetricTrapezoidal,
+    FresnelHankelAxisymmetricSciPy,
 )
+from .utils import CPUTracker
 
 __all__ = [
-    # Lenses
+    # lenses
     "Lens", "AxisymmetricLens", "SIS", "PointLens",
-    # Axisymmetric solvers
-    "FresnelHankel", "FresnelHankelQuad",
-    # 2-D solvers
-    "FresnelNUFFT2D", "FresnelNUFFT3", "FresnelDirect3",
+    # general 2-D
+    "FresnelNUFFT3Vec",
+    # axisymmetric (Hankel)
+    "FresnelHankelAxisymmetric",
+    "FresnelHankelAxisymmetricTrapezoidal",
+    "FresnelHankelAxisymmetricSciPy",
+    # controls
+    "set_num_threads",
+    # CPU Tracker
+    "CPUTracker",
 ]
 
-__version__ = "0.1.0"
+def set_num_threads(n: int):
+    """
+    Hint FINUFFT/NumPy/OMP to use up to `n` threads.
+    Call this once early in your script.
+    """
+    n = int(n)
+    os.environ["OMP_NUM_THREADS"] = str(n)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(n)
+    os.environ["MKL_NUM_THREADS"] = str(n)
+    try:
+        import finufft
+        finufft.set_num_threads(n)
+    except Exception:
+        pass
