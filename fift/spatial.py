@@ -1,5 +1,8 @@
-import numpy as np
+import os
 import time
+import numpy as np
+import numexpr as ne
+
 from .utils import gauss_legendre_2d, CPUTracker
 
 try:
@@ -8,62 +11,77 @@ try:
 except Exception:
     _FINUFFT = False
 
-_TWO_PI = 2.0*np.pi
+_TWO_PI = 2.0 * np.pi
 
-import psutil
-import threading
-import time
-import os, math
-import multiprocessing as mp
-from threadpoolctl import threadpool_limits
-
-_G_u1 = _G_u2 = _G_W = _G_lens = None
-
-def _init_worker(u1, u2, W, lens):
-    
-    # globals let us avoid re-sending big arrays each task when using 'fork'
-    global _G_u1, _G_u2, _G_W, _G_lens
-    _G_u1, _G_u2, _G_W, _G_lens = u1, u2, W, lens
-    # ensure math inside worker uses 1 thread (MKL/OpenBLAS/NumPy ufuncs)
-    threadpool_limits(limits=1)
-
-def _compute_cj_for_w(w):
-    
-    u1, u2, W, lens = _G_u1, _G_u2, _G_W, _G_lens
-    phase = (u1*u1 + u2*u2)/(2.0*w) - w*lens.psi_xy(u1/w, u2/w)
-    return np.exp(1j*phase) * W
 
 def _integrand_coeffs(u1, u2, w, lens, W):
     """
     I(y) = ∫ d^2u e^{-i u·y} exp{i [u^2/(2w) - w ψ(u/w)]}.
     """
-    phase = (u1*u1 + u2*u2) / (2.0*w) - w * lens.psi_xy(u1/w, u2/w)
+    phase = (u1 * u1 + u2 * u2) / (2.0 * w) - w * lens.psi_xy(u1 / w, u2 / w)
     return np.exp(1j * phase) * W
+
 
 class FresnelNUFFT3Vec:
     r"""
     Batched version of FresnelNUFFT3 for multiple frequencies w.
-
-    If shared_Umax=True (default), uses a single quadrature grid with
-    Umax = max(|w|)*Xmax. If shared_Umax=False, evaluates each w with its
-    own quadrature (slower, more accurate when low w require large Xmax).
     """
-    def __init__(self, lens, n_gl=128, Umax=12.0, eps=1e-12, shared_Umax=True):
-        
+    def __init__(
+        self,
+        lens,
+        n_gl=128,
+        Umax=12.0,
+        eps=1e-12,
+        shared_Umax=True,
+        numexpr_threads=None,
+        track_perf=True
+    ):
+
         if not _FINUFFT:
-            raise ImportError("finufft is required for FresnelNUFFT3Vec; install finufft or use FresnelDirect3.")
-        
+            raise ImportError(
+                "finufft is required for FresnelNUFFT3Vec; "
+                "install finufft or use FresnelDirect3."
+            )
+
         self.lens = lens
         self.n_gl = int(n_gl)
         self.Umax = float(Umax)
-        self.eps  = float(eps)
+        self.eps = float(eps)
         self.shared_Umax = bool(shared_Umax)
 
-    def __call__(self, w_vec, y1_targets, y2_targets):
-        
+        self._numexpr_threads = None
+        if numexpr_threads is not None:
+            requested = int(numexpr_threads)
+            max_env = os.environ.get("NUMEXPR_MAX_THREADS")
+            if max_env is not None:
+                try:
+                    max_env_int = int(max_env)
+                except ValueError:
+                    max_env_int = requested
+            else:
+                max_env_int = requested
+
+            max_cores = ne.detect_number_of_cores()
+            effective = min(requested, max_env_int, max_cores)
+            if effective < 1:
+                effective = 1
+
+            ne.set_num_threads(effective)
+            self._numexpr_threads = effective
+            if track_perf:
+                print(f"[numexpr] using {effective} threads "
+                      f"(requested={requested}, MAX={max_env_int}, cores={max_cores})")
+        else:
+            self._numexpr_threads = ne.get_num_threads()
+            if track_perf:
+                print(f"[numexpr] using default thread count: {self._numexpr_threads}")
+
+    def __call__(self, w_vec, y1_targets, y2_targets, track_perf=True):
+
         w_vec = np.asarray(w_vec, dtype=float).ravel()
         if np.any(w_vec == 0):
             raise ValueError("All w must be nonzero.")
+
         y1_targets = np.asarray(y1_targets, dtype=float)
         y2_targets = np.asarray(y2_targets, dtype=float)
         if y1_targets.shape != y2_targets.shape:
@@ -72,79 +90,200 @@ class FresnelNUFFT3Vec:
         if self.shared_Umax:
             t0 = time.perf_counter()
 
-            # 1) quadrature setup
             Umax = self.Umax
             u1, u2, W = gauss_legendre_2d(self.n_gl, Umax)
             t1 = time.perf_counter()
 
-            #2) scales/phases/coeffs
-            
-            with CPUTracker() as _c:
-                
-                h  = np.pi / Umax
+            with CPUTracker() as _c_total:
+                t2_0 = time.perf_counter()
+
+                # 2a) simple scalings independent of w
+                t2a_0 = time.perf_counter()
+                h = np.pi / Umax
                 xj = h * u1
                 yj = h * u2
                 sk = y1_targets / h
                 tk = y2_targets / h
+                t2a_1 = time.perf_counter()
 
-                ctx = mp.get_context("fork")
-                n_procs = min(len(w_vec), 112)
-                chunk = max(1, len(w_vec) // (n_procs * 4))
+                # 2b) coefficient computation over all w
+                t2b_0 = time.perf_counter()
 
-                with ctx.Pool(processes=n_procs, initializer=_init_worker,
-                              initargs=(u1, u2, W, self.lens)) as pool:
-                    cj_iter = pool.imap(_compute_cj_for_w, map(float, w_vec), chunksize=chunk)
-                    cj_list = list(cj_iter)
+                # shapes:     u1, u2, W: (N,)
+                #             w_vec:     (M,)
+                # we build (M, N) arrays for u1_over_w, u2_over_w, psi, phase, cj
 
-                cj = np.stack(cj_list, axis=0)
-            
-            print(_c.report("[coeffs]"))
-                
+                M = len(w_vec)
+                N = u1.size
+
+                w2d = w_vec[:, None]          # (M, 1)
+                u1_2d = u1[None, :]           # (1, N)
+                u2_2d = u2[None, :]           # (1, N)
+                W_2d = W[None, :]             # (1, N)
+
+                # --- scale u/w for all w (using numexpr) ---
+                scale_uw_0 = time.perf_counter()
+                # u1_over_w = u1_2d / w2d
+                # u2_over_w = u2_2d / w2d
+                u1_over_w = ne.evaluate("u1_2d / w2d")      # (M, N)
+                u2_over_w = ne.evaluate("u2_2d / w2d")      # (M, N)
+                scale_uw_1 = time.perf_counter()
+
+                # --- psi_xy for all w ---
+                psi_0 = time.perf_counter()
+                psi = self.lens.psi_xy(u1_over_w, u2_over_w)   # (M, N)
+                psi_1 = time.perf_counter()
+
+                # --- phase calculation for all w (using numexpr) ---
+                phase_0 = time.perf_counter()
+                base_quad = (u1 * u1 + u2 * u2) / 2.0          # (N,)
+                base_quad_2d = base_quad[None, :]              # (1, N)
+                phase = ne.evaluate("base_quad_2d / w2d - w2d * psi")  # (M, N)
+                phase_1 = time.perf_counter()
+
+                # --- exponential for all w (numexpr via cos/sin) ---
+                exp_0 = time.perf_counter()
+                # exp(i * phase) = cos(phase) + i sin(phase)
+                cos_phase = ne.evaluate("cos(phase)")          # (M, N)
+                sin_phase = ne.evaluate("sin(phase)")          # (M, N)
+                re = ne.evaluate("cos_phase * W_2d")           # (M, N)
+                im = ne.evaluate("sin_phase * W_2d")           # (M, N)
+                cj = re + 1j * im                              # (M, N) complex128
+                exp_1 = time.perf_counter()
+
+                t2b_1 = time.perf_counter()
+                t2_1 = time.perf_counter()
+
+            # fine-grained timings
+            scale_uw_time = scale_uw_1 - scale_uw_0
+            psi_time = psi_1 - psi_0
+            phase_time = phase_1 - phase_0
+            exp_time = exp_1 - exp_0
+            loop_wall = t2b_1 - t2b_0
+            sub_total = scale_uw_time + psi_time + phase_time + exp_time
+            unaccounted = loop_wall - sub_total
+
             t2 = time.perf_counter()
 
+            # ------------------------------------------------------------------
             # 3) NUFFT
+            # ------------------------------------------------------------------
             with CPUTracker() as _n:
                 I = nufft2d3(xj, yj, cj, sk, tk, isign=-1, eps=self.eps)
-            print(_n.report("[nufft]"))
+            if track_perf:
+                print(_n.report("[nufft]"))
             t3 = time.perf_counter()
 
+            # ------------------------------------------------------------------
             # 4) quad phase + allocate output
-            quad_phase = (y1_targets**2 + y2_targets**2)/2.0
+            # ------------------------------------------------------------------
+            quad_phase = (y1_targets ** 2 + y2_targets ** 2) / 2.0
             F = np.empty_like(I, dtype=np.complex128)
             t4 = time.perf_counter()
 
+            # ------------------------------------------------------------------
             # 5) final per-frequency multiplication
+            # ------------------------------------------------------------------
             for i, w in enumerate(w_vec):
-                F[i] = np.exp(1j*w*quad_phase) * I[i] / (1j*w*_TWO_PI)
+                F[i] = np.exp(1j * w * quad_phase) * I[i] / (1j * w * _TWO_PI)
             t5 = time.perf_counter()
 
-            # Prints
-            print(f"[timing] 1. quadrature setup:        {t1 - t0:.6f} s")
-            print(f"[timing] 2. scales/phases/coeffs:    {t2 - t1:.6f} s")
-            print(f"[timing] 3. NUFFT:                   {t3 - t2:.6f} s")
-            print(f"[timing] 4. quad_phase+alloc:        {t4 - t3:.6f} s")
-            print(f"[timing] 5. final loop:              {t5 - t4:.6f} s")
-            print(f"[timing] total:                      {t5 - t0:.6f} s")
+            def pct(part, whole):
+                return (part / whole * 100.0) if whole > 0 else 0.0
+
+            step2_total = (t2_1 - t2_0)
+            total_time = (t5 - t0)
+
+            
+            if track_perf:
+                
+                print()
+                print("────────────────────────────────────────────────────────────")
+                print(" Step 2: Coefficient Computation (Vectorized + NumExpr)")
+                print("────────────────────────────────────────────────────────────")
+                print(_c_total.report("  CPU usage summary"))
+                print()
+
+                print("  Breakdown (percent of Step 2):")
+                print(f"    2a. Pre-scaling (host)          : "
+                      f"{pct(t2a_1 - t2a_0, step2_total):6.2f}%  ({t2a_1 - t2a_0:10.6f} s)")
+
+                print()
+                print(f"    2b. Coefficient build (total)   : "
+                      f"{pct(loop_wall, step2_total):6.2f}%  ({loop_wall:10.6f} s)")
+
+                print(f"        ├─ scale u/w (all w)        : "
+                      f"{pct(scale_uw_time, step2_total):6.2f}%  ({scale_uw_time:10.6f} s)")
+                print(f"        ├─ lens potential ψ(x)      : "
+                      f"{pct(psi_time, step2_total):6.2f}%  ({psi_time:10.6f} s)")
+                print(f"        ├─ phase calculation        : "
+                      f"{pct(phase_time, step2_total):6.2f}%  ({phase_time:10.6f} s)")
+                print(f"        ├─ exp(i·phase)             : "
+                      f"{pct(exp_time, step2_total):6.2f}%  ({exp_time:10.6f} s)")
+                print(f"        └─ unaccounted              : "
+                      f"{pct(unaccounted, step2_total):6.2f}%  ({unaccounted:10.6f} s)")
+
+                print()
+                print(f"  Step 2 total                      : "
+                      f"{pct(step2_total, step2_total):6.2f}%  ({step2_total:10.6f} s)")
+                print("────────────────────────────────────────────────────────────")
+                print()
+
+                # -------------------------------------------------------------
+                # Overall run summary
+                # -------------------------------------------------------------
+                print("Overall Timing Summary (percent of TOTAL)")
+                print("────────────────────────────────────────────────────────────")
+
+                print(f"  1. Quadrature setup               : "
+                      f"{pct(t1 - t0, total_time):6.2f}%  ({t1 - t0:10.6f} s)")
+
+                print(f"  2. Coefficients (total)           : "
+                      f"{pct(t2 - t1, total_time):6.2f}%  ({t2 - t1:10.6f} s)")
+
+                print(f"  3. NUFFT                          : "
+                      f"{pct(t3 - t2, total_time):6.2f}%  ({t3 - t2:10.6f} s)")
+
+                print(f"  4. quad_phase + alloc             : "
+                      f"{pct(t4 - t3, total_time):6.2f}%  ({t4 - t3:10.6f} s)")
+
+                print(f"  5. final per-w loop               : "
+                      f"{pct(t5 - t4, total_time):6.2f}%  ({t5 - t4:10.6f} s)")
+
+                print("────────────────────────────────────────────────────────────")
+                print(f"  TOTAL                             : "
+                      f"{pct(total_time, total_time):6.2f}%  ({total_time:10.6f} s)")
+                print("────────────────────────────────────────────────────────────")
+                print()
 
             return F
 
         else:
-            # Per-w quadrature
+            # ------------------------------------------------------------------
+            # Per-w quadrature (no multiprocessing)
+            # ------------------------------------------------------------------
             F_list = []
             for w in w_vec:
                 Umax = abs(w) * self.Xmax
                 u1, u2, W = gauss_legendre_2d(self.n_gl, Umax)
 
-                h  = np.pi / Umax
+                h = np.pi / Umax
                 xj = h * u1
                 yj = h * u2
                 sk = y1_targets / h
                 tk = y2_targets / h
 
-                phase = (u1*u1 + u2*u2)/(2.0*w) - w*self.lens.psi_xy(u1/w, u2/w)
-                cj    = np.exp(1j*phase) * W
+                phase = (u1 * u1 + u2 * u2) / (2.0 * w) - w * self.lens.psi_xy(
+                    u1 / w, u2 / w
+                )
+                cj = np.exp(1j * phase) * W
 
-                I  = nufft2d3(xj, yj, cj, sk, tk, isign=-1, eps=self.eps)
-                Fw = np.exp(1j*w*(y1_targets**2 + y2_targets**2)/2.0) * I / (1j*w*_TWO_PI)
+                I = nufft2d3(xj, yj, cj, sk, tk, isign=-1, eps=self.eps)
+                Fw = (
+                    np.exp(1j * w * (y1_targets ** 2 + y2_targets ** 2) / 2.0)
+                    * I
+                    / (1j * w * _TWO_PI)
+                )
                 F_list.append(Fw)
+
             return np.stack(F_list, axis=0)
