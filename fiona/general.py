@@ -2,6 +2,15 @@
 # fiona/general.py
 ####################################################################
 
+### This code computes integral in the u-domain.
+### In the u-domain formulation, all frequency dependence is moved into the integrand coefficients, 
+### while the oscillatory kernel is frequency-independent. This allows reuse of a single NUFFT geometry 
+### and efficient batched evaluation over many frequencies, but requires recomputing the lens potential
+### at scaled arguments ψ(u/w) for each frequency. In contrast, the x-domain formulation evaluates the
+### lens potential ψ(x) once on a fixed spatial quadrature grid and is therefore advantageous when ψ is
+### expensive to compute, but the NUFFT targets scale with frequency, so a separate NUFFT must be executed
+### for each frequency, making it less efficient when many frequencies are needed.
+
 import os
 import numpy as np
 import numexpr as ne
